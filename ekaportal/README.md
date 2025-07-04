@@ -19,6 +19,11 @@ Covers are not fetched with metadata, since covers on Eka's portal are not very 
 
 ### Tutorials
 
+#### Adding the Plugin to Calibre
+1. Download the latest Eka's Portal plugin zip from https://github.com/jobobby04/calibre_plugins/releases/
+2. At the top of Calibre, press `Preferences`
+3. Select `Plugins` under `Advanced`
+4. Click `Load plugin from file` and select the downloaded zip file
 
 #### Setting up auto-convert to EPUB
 I highly suggest setting up auto-convert to EPUB in Calibre, it makes downstream readers able to read anything your calibre insance distributes.
