@@ -1,0 +1,7 @@
+The Eka's Portal Plugin
+===========================
+
+Created by Jobobby04
+
+Requires calibre >= 0.7.53
+
