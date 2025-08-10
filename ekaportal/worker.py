@@ -7,6 +7,7 @@ import socket, re
 from threading import Thread
 
 from mechanize import Request
+from datetime import datetime
 
 from calibre.ebooks.BeautifulSoup import BeautifulSoup
 
@@ -105,9 +106,19 @@ class Worker(Thread): # Get details
         self.eka_id = eka_id
 
         try:
+            mi.pubdate = self.parse_pubdate(root)
+        except:
+            self.log.exception('Error parsing publish date for url: %r' % self.url)
+
+        try:
             mi.tags = self.parse_tags(root)
         except:
             self.log.exception('Error parsing tags for url: %r'%self.url)
+
+        try:
+            mi.comments = self.parse_summary(root)
+        except:
+            self.log.exception('Error parsing comments for url: %r' % self.url)
 
         # There will be no other on Eka's Portal!
         mi.publisher = 'Eka\'s Portal'
@@ -137,16 +148,36 @@ class Worker(Thread): # Get details
             self.log.info("parse_author: author=", author_node[0].text)
             return author_node[0].text
         else:
-            self.log.error("parse_title: no author")
+            self.log.error("parse_author: no author")
         return None
 
     def parse_tags(self, root):
         tag_nodes = root.css.select('div#taginfo span.taglist > a')
         if tag_nodes:
             tag_list = [ x.text for x in tag_nodes ]
-            self.log.info("parse_author: tags=", tag_list)
+            self.log.info("parse_tags: tags=", tag_list)
             return tag_list
         else:
-            self.log.error("parse_title: no author")
+            self.log.error("parse_tags: no tags")
+        return None
+
+    def parse_pubdate(self, root):
+        pubdate_node = root.css.select('.pretty-date')
+        if pubdate_node:
+            pubdate_dirty = pubdate_node[0].attrs.get('title')
+            pubdate_clean = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', pubdate_dirty)
+            self.log.info("parse_pubdate: pubdate_clean=", pubdate_clean)
+            return datetime.strptime(pubdate_clean, "%b %d, %Y %I:%M %p")
+        else:
+            self.log.error("parse_tags: no pubdate")
+        return None
+
+    def parse_summary(self, root):
+        summary_node = root.css.select('.g-box-contents > p')
+        if summary_node:
+            self.log.info("parse_summary: summary=", summary_node[0].prettify())
+            return summary_node[0].prettify()
+        else:
+            self.log.error("parse_summary: no summary")
         return None
 
