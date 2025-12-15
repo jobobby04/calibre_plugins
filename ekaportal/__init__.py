@@ -17,7 +17,7 @@ class Eka(Source):
     description         = 'Downloads metadata from Eka\'s Portal'
     supported_platforms = ['windows', 'osx', 'linux']  # Platforms this plugin will run on
     author              = 'Jobobby04'  # The author of this plugin
-    version             = (1, 1, 0)   # The version number of this plugin
+    version             = (1, 1, 1)   # The version number of this plugin
     minimum_calibre_version = (2, 0, 0)
     capabilities = frozenset(['identify'])
     touched_fields = frozenset(['title', 'authors', 'identifier:eka',

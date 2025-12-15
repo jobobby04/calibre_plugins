@@ -173,7 +173,7 @@ class Worker(Thread): # Get details
         return None
 
     def parse_summary(self, root):
-        summary_node = root.css.select('.g-box-contents > p')
+        summary_node = root.css.select('.g-box-contents .item-main-column p')
         if summary_node:
             self.log.info("parse_summary: summary=", summary_node[0].prettify())
             return summary_node[0].prettify()
