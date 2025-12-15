@@ -21,6 +21,9 @@ When you select a book in Calibre, you can then click the toolbar menu to change
 3. Select `Plugins` under `Advanced`
 4. Click `Load plugin from file` and select the downloaded zip file
 
+#### Copy Metadata from website example
+An example script for copying metadata from a website is located [here](../scripts/TOB%20Story%20Downloader%20&%20Copier.js)
+
 ## Development / Contributions
 
 All Jobobby04's calibre plugins are developed and maintained in GitHub at:

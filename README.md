@@ -8,9 +8,10 @@ This is the official home for Jobobby04's plugins for [calibre][calibre-url].
 
 The following plugins are maintained in this repository:
 
-| Plugin Name | Plugin Type | Details                       | Summary                                                   |
-|-------------|-------------|-------------------------------|-----------------------------------------------------------|
-| EkaPortal   | Metadata    | [README](ekaportal/README.md) | Download metadata from [Eka's Portal][https://aryion.com] |
+| Plugin Name        | Plugin Type | Details                                | Summary                                                   |
+|--------------------|-------------|----------------------------------------|-----------------------------------------------------------|
+| EkaPortal          | Metadata    | [README](ekaportal/README.md)          | Download metadata from [Eka's Portal][https://aryion.com] |
+| Clipboard Metadata | Metadata    | [README](clipboard_metadata/README.md) | Copy metadata from any website and paste it in Calibre    |
 
 ## Contributions are Welcome
 
