@@ -1,0 +1,7 @@
+Clipboard Metadata Plugin
+===========================
+
+Created by Jobobby04
+
+Requires calibre >= 0.7.53
+
