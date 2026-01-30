@@ -134,7 +134,7 @@ class Worker(Thread): # Get details
         return re.search(Eka.BASE_URL + '/g4/view/(.*)', url).groups(0)[0]
 
     def parse_title(self, root):
-        title_node = root.css.select('div.g-box-header > span.g-box-title') #.xpath('//div[@class="g-box-header"]/span[@class="g-box-title"]') #'div.g-box-header > span.g-box-title')
+        title_node = root.css.select('div.g-box-header > .g-box-title') #.xpath('//div[@class="g-box-header"]/span[@class="g-box-title"]') #'div.g-box-header > span.g-box-title')
         if title_node:
             self.log.info("parse_title: title=", title_node[1].text)
             return title_node[1].text
