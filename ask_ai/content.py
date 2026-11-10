@@ -181,9 +181,16 @@ def metadata_block(mi, allowed_fields):
 
 
 def build_single_shot_messages(mi, content, is_excerpt, allowed_fields,
-                               language_instruction=''):
-    """Build the system message for a single-shot question about the book."""
+                               language_instruction='', series_context=''):
+    """Build the system message for a single-shot question about the book.
+
+    ``series_context`` is an optional pre-formatted block of earlier books'
+    summaries (see :func:`format_series_context`), prepended so the AI can keep
+    series continuity.
+    """
     header = []
+    if series_context:
+        header.append(series_context)
     meta = metadata_block(mi, allowed_fields)
     if meta:
         header.append(meta)
@@ -227,9 +234,17 @@ def build_map_prompt(mi, index, total, chunk, allowed_fields, task_prompt=''):
     return prefix + intro + goal + tail
 
 
-def build_reduce_messages(mi, partials, allowed_fields, language_instruction=''):
-    """Build the system message for the reduce step of map-reduce."""
+def build_reduce_messages(mi, partials, allowed_fields, language_instruction='',
+                          series_context=''):
+    """Build the system message for the reduce step of map-reduce.
+
+    ``series_context`` is an optional pre-formatted block of earlier books'
+    summaries, prepended for series continuity (see
+    :func:`format_series_context`).
+    """
     header = []
+    if series_context:
+        header.append(series_context)
     meta = metadata_block(mi, allowed_fields)
     if meta:
         header.append(meta)
@@ -374,6 +389,125 @@ def apply_summary_to_comments(existing, summary, mode='prepend'):
 
 
 # ---------------------------------------------------------------------------
+# Series context (prior-book summaries for continuity)
+# ---------------------------------------------------------------------------
+
+def extract_ai_block(comments):
+    """Return the AI summary stored between the AskAI markers in ``comments``,
+    as markdown, or ``None`` if there is no block.
+
+    This is the inverse of :func:`apply_summary_to_comments`: the stored block
+    is HTML (the comments field is HTML), so it is converted back to markdown
+    for use as readable context.
+    """
+    comments = (comments or '').strip()
+    b = comments.find(BEGIN_MARKER)
+    e = comments.find(END_MARKER)
+    if b == -1 or e == -1 or e < b:
+        return None
+    body = comments[b + len(BEGIN_MARKER):e].strip()
+    if not body:
+        return None
+    return comments_as_markdown(body)
+
+
+def _apply_budget(entries, max_chars, max_books):
+    """Trim ``entries`` (a list of ``(position, title, summary)`` in
+    chronological order) to fit the budget: at most ``max_books`` (0 =
+    unlimited) and at most ``max_chars`` total summary characters, dropping
+    from the *oldest* so the most recent context is kept. Returns a new list;
+    the input is not modified."""
+    entries = list(entries)
+    if max_books and max_books > 0:
+        entries = entries[-max_books:]
+    total = sum(len(e[2]) for e in entries)
+    while entries and total > max_chars:
+        total -= len(entries[0][2])
+        entries.pop(0)
+    return entries
+
+
+def build_series_context(db, book_id, max_chars, max_books=0):
+    """Build the series context for ``book_id`` from *saved* summaries.
+
+    Returns ``(entries, position)`` where ``entries`` is a list of
+    ``(position, title, summary)`` for the earlier books in the series
+    (chronological order, trimmed to the budget) and ``position`` is the
+    current book's 1-based position in the series (``None`` if it has no
+    series). An earlier book that was never summarized-and-saved contributes
+    nothing.
+    """
+    series_ids = db.books_in_series_of(book_id, index_is_id=True)
+    if not series_ids:
+        return [], None
+    position = series_ids.index(book_id) + 1 if book_id in series_ids else None
+    entries = []
+    for i, sid in enumerate(series_ids):
+        if sid == book_id:
+            break  # series_ids is sorted by series_index; the rest are later
+        mi = db.new_api.get_metadata(sid)
+        block = extract_ai_block(mi.comments)
+        if block:
+            entries.append((i + 1, mi.title, block))
+    return _apply_budget(entries, max_chars, max_books), position
+
+
+def format_series_context(series_name, entries, book_position):
+    """Build the series-context block to prepend to a prompt.
+
+    ``entries`` is a list of ``(position, title, summary)`` for earlier books
+    (chronological order); ``book_position`` is the current book's 1-based
+    position in the series. Returns ``''`` when there are no entries.
+    """
+    if not entries:
+        return ''
+    lines = ['--- series context: earlier books in "%s" ---' % series_name]
+    for position, title, summary in entries:
+        lines.append('### Book %d — %s' % (position, title))
+        lines.append(summary)
+        lines.append('')
+    lines.append('--- end series context ---')
+    lines.append('')
+    lines.append('You are summarizing book %s of this series. Use the earlier '
+                 'context for continuity (characters, plot, setting) where '
+                 'relevant, but summarize only the current book.'
+                 % (book_position if book_position is not None else '?'))
+    return '\n'.join(lines)
+
+
+def _series_index(mi):
+    """The book's series position, defaulting to 1.0 when unset."""
+    idx = getattr(mi, 'series_index', None)
+    return idx if idx is not None else 1.0
+
+
+def order_books_for_series(books):
+    """Reorder ``books`` (a list of ``(book_id, mi)``) so that books in the
+    same series form a contiguous block in series_index order. Series groups
+    appear in the order they first appear in the selection; non-series books
+    keep their selection position."""
+    groups = {}
+    for book_id, mi in books:
+        name = (mi.series or '').strip()
+        if name:
+            groups.setdefault(name, []).append((book_id, mi))
+    for name in groups:
+        groups[name].sort(key=lambda b: _series_index(b[1]))
+    emitted = set()
+    out = []
+    for book_id, mi in books:
+        name = (mi.series or '').strip()
+        if name and name in groups:
+            if book_id not in emitted:
+                for bid, mii in groups[name]:
+                    out.append((bid, mii))
+                    emitted.add(bid)
+        else:
+            out.append((book_id, mi))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Batch summarization (runs in a worker thread)
 # ---------------------------------------------------------------------------
 
@@ -433,15 +567,17 @@ def format_prompt(template, mi):
 
 
 def summarize_text(mi, text, prompt, prefs, plugin, allowed_fields,
-                   language_instruction='', abort=None, log=None,
-                   notifications=None):
+                   language_instruction='', series_context='', abort=None,
+                   log=None, notifications=None):
     """
     Summarize ``text`` (the full book text) with ``prompt``.
 
     Uses the same single-shot / map-reduce strategy as the single-book flow
-    (see the ``strategy`` pref). Returns ``(summary, is_excerpt)`` where
-    ``is_excerpt`` is True when the book was too long to send whole and was
-    sampled. Runs in a worker thread; raises on cancellation or AI error.
+    (see the ``strategy`` pref). ``series_context`` is an optional pre-formatted
+    block of earlier books' summaries, injected for continuity. Returns
+    ``(summary, is_excerpt)`` where ``is_excerpt`` is True when the book was
+    too long to send whole and was sampled. Runs in a worker thread; raises on
+    cancellation or AI error.
     """
     strategy = prefs['strategy']
     needs_map = strategy == 'map_reduce' or (
@@ -454,14 +590,15 @@ def summarize_text(mi, text, prompt, prefs, plugin, allowed_fields,
                                   notifications=notifications)
         partials = cap_partials(partials, prefs['max_chars'])
         messages = list(build_reduce_messages(mi, partials, allowed_fields,
-                                              language_instruction))
+                                              language_instruction,
+                                              series_context))
     else:
         content_text, is_excerpt = sample_text(text, prefs['max_chars'],
                                                prefs['sampling'],
                                                prefs['sample_segments'])
         messages = list(build_single_shot_messages(
             mi, content_text, is_excerpt, allowed_fields,
-            language_instruction))
+            language_instruction, series_context))
     messages.append(ChatMessage(prompt))
     acc = StreamedResponseAccumulator()
     for res in plugin.text_chat(messages):
@@ -481,12 +618,40 @@ def run_batch(db, books, prompt_template, prefs, plugin, allowed_fields,
     Summarize each book in ``books`` (a list of ``(book_id, mi)`` pairs)
     sequentially with ``prompt_template``.
 
-    Returns a list of :class:`BookResult`, one per book, in the same order.
-    A failure on one book (no extractable format, AI error, cancellation, ...)
-    is recorded on that book's result and does not stop the batch. Runs in a
-    worker thread.
+    Books in the same series are reordered to be contiguous in series_index
+    order. Each book is given the summaries of the earlier books in its series
+    as context for continuity: summaries generated earlier in this run (in
+    memory) plus the saved comments of earlier books not in the selection.
+    Returns a list of :class:`BookResult`, one per book, in the (reordered)
+    processing order. A failure on one book (no extractable format, AI error,
+    cancellation, ...) is recorded on that book's result and does not stop the
+    batch. Runs in a worker thread.
     """
     lang = language_instruction()
+    series_enabled = prefs.get('series_context', True)
+    max_ctx_chars = prefs.get('series_context_chars', 20000)
+    max_ctx_books = prefs.get('series_context_max_books', 0)
+    books = order_books_for_series(books)
+    # Per series: the saved summaries of all its books (position ->
+    # (title, summary)), so a book's context can draw on earlier books that are
+    # not part of this run.
+    saved = {}
+    if series_enabled:
+        for book_id, mi in books:
+            name = (mi.series or '').strip()
+            if not name or name in saved:
+                continue
+            series_ids = db.books_in_series_of(book_id, index_is_id=True)
+            if not series_ids:
+                continue
+            s = {}
+            for i, sid in enumerate(series_ids):
+                smi = db.new_api.get_metadata(sid)
+                block = extract_ai_block(smi.comments)
+                if block:
+                    s[i + 1] = (smi.title, block)
+            saved[name] = s
+    in_memory = {}  # series name -> {position: (title, summary)}
     results = []
     total = len(books)
     for i, (book_id, mi) in enumerate(books):
@@ -500,15 +665,36 @@ def run_batch(db, books, prompt_template, prefs, plugin, allowed_fields,
         base, span = i / total, 1 / total
         notes = (_ScaledNotifications(notifications, base, span)
                  if notifications is not None else None)
+        name = (mi.series or '').strip()
+        position = None
+        series_ctx = ''
+        if series_enabled and name:
+            series_ids = db.books_in_series_of(book_id, index_is_id=True)
+            position = series_ids.index(book_id) + 1 \
+                if book_id in series_ids else None
+            if position:
+                entries = []
+                mem = in_memory.get(name, {})
+                svd = saved.get(name, {})
+                for p in range(1, position):
+                    entry = mem.get(p) or svd.get(p)
+                    if entry:
+                        entries.append((p, entry[0], entry[1]))
+                entries = _apply_budget(entries, max_ctx_chars, max_ctx_books)
+                if entries:
+                    series_ctx = format_series_context(name, entries, position)
         try:
             text, fmt = get_book_text(db, book_id)
             prompt = format_prompt(prompt_template, mi)
             summary, is_excerpt = summarize_text(
                 mi, text, prompt, prefs, plugin, allowed_fields, lang,
+                series_context=series_ctx,
                 abort=abort, log=log, notifications=notes)
             results.append(BookResult(book_id, title, authors, fmt=fmt,
                                       summary=summary, status='ok',
                                       is_excerpt=is_excerpt))
+            if series_enabled and name and position:
+                in_memory.setdefault(name, {})[position] = (title, summary)
         except InterruptedError:
             results.append(BookResult(book_id, title, authors,
                                       status='error', error='Cancelled'))

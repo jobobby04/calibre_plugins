@@ -5,7 +5,7 @@ __license__   = 'GPL v3'
 __copyright__ = '2026, Jobobby04'
 __docformat__ = 'restructuredtext en'
 
-from qt.core import (QComboBox, QFormLayout, QGroupBox,
+from qt.core import (QCheckBox, QComboBox, QFormLayout, QGroupBox,
                      QLineEdit, QVBoxLayout, QWidget)
 
 from calibre.utils.config import JSONConfig
@@ -21,6 +21,9 @@ DEFAULTS = {
     'sample_segments': 12,
     'chunk_chars': 100000,
     'save_mode': 'prepend',
+    'series_context': True,
+    'series_context_chars': 20000,
+    'series_context_max_books': 0,
 }
 
 plugin_prefs.defaults.update(DEFAULTS)
@@ -89,6 +92,33 @@ class ConfigWidget(QWidget):
         form.addRow(_('Save to comments:'), self.save_mode)
 
         outer.addWidget(box)
+
+        sbox = QGroupBox(_('Series context'), self)
+        sform = QFormLayout(sbox)
+
+        self.series_context = QCheckBox(
+            _('Use earlier books in a series as context, for continuity'), self)
+        self.series_context.setChecked(c['series_context'])
+        self.series_context.setToolTip(
+            _('When summarizing a book that is part of a series, give the AI the '
+              'summaries of the earlier books in that series so the summaries '
+              'stay consistent (characters, plot, setting).'))
+        sform.addRow(self.series_context)
+
+        self.series_context_chars = QLineEdit(str(c['series_context_chars']), self)
+        self.series_context_chars.setToolTip(
+            _('The most characters of earlier books\' summaries to include as '
+              'context. When the total is larger, the oldest books are dropped.'))
+        sform.addRow(_('Max context characters:'), self.series_context_chars)
+
+        self.series_context_max_books = QLineEdit(
+            str(c['series_context_max_books']), self)
+        self.series_context_max_books.setToolTip(
+            _('The most earlier books to include as context (0 = as many as fit '
+              'in the character budget).'))
+        sform.addRow(_('Max earlier books:'), self.series_context_max_books)
+
+        outer.addWidget(sbox)
         outer.addStretch(1)
 
     def save_settings(self):
@@ -99,5 +129,11 @@ class ConfigWidget(QWidget):
         p['sample_segments'] = _to_int(self.sample_segments.text(), DEFAULTS['sample_segments'])
         p['chunk_chars'] = _to_int(self.chunk_chars.text(), DEFAULTS['chunk_chars'])
         p['save_mode'] = self.save_mode.currentData()
+        p['series_context'] = self.series_context.isChecked()
+        p['series_context_chars'] = _to_int(
+            self.series_context_chars.text(), DEFAULTS['series_context_chars'])
+        p['series_context_max_books'] = _to_int(
+            self.series_context_max_books.text(),
+            DEFAULTS['series_context_max_books'])
         for key, val in p.items():
             plugin_prefs[key] = val

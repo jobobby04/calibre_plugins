@@ -152,18 +152,27 @@ class AskAIAction(InterfaceAction):
         strategy = prefs['strategy']
         needs_map = strategy == 'map_reduce' or (
             strategy == 'auto' and len(text) > prefs['max_chars'])
+        # Load the series context (earlier books' saved summaries) so the AI
+        # can keep continuity. Reading a few comments is cheap, so do it here.
+        series_ctx = []
+        if prefs.get('series_context', True):
+            series_ctx, _ = content.build_series_context(
+                self.gui.current_db, book_id, prefs['series_context_chars'],
+                prefs['series_context_max_books'])
         if needs_map:
             # A long book: open the dialog to pick a task. Summarizing it for
             # that task runs as a background job only after the user confirms,
             # so the part summaries are tailored to the chosen task.
-            ctx = BookContext(mi, 'map_reduce', raw_text=text, partials=[], fmt=fmt)
+            ctx = BookContext(mi, 'map_reduce', raw_text=text, partials=[],
+                              fmt=fmt, series_context=series_ctx)
             auto_prompt = action.prompt_text([mi]) if action is not None else None
             self.open_dialog(book_id, ctx, auto_prompt=auto_prompt)
         else:
             content_text, is_excerpt = content.sample_text(
                 text, prefs['max_chars'], prefs['sampling'], prefs['sample_segments'])
             ctx = BookContext(mi, 'single', content=content_text,
-                              is_excerpt=is_excerpt, fmt=fmt)
+                              is_excerpt=is_excerpt, fmt=fmt,
+                              series_context=series_ctx)
             self.open_dialog(book_id, ctx)
 
     def open_dialog(self, book_id, ctx, auto_prompt=None):

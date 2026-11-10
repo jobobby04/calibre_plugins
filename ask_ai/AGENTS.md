@@ -80,9 +80,10 @@ AI (`calibre/gui2/dialogs/llm_book.py`):
 
 - `content.py` — GUI-free: format picking, text extraction, sampling, chunking,
   prompt building, the map-reduce engine (`run_map_reduce`), the batch engine
-  (`run_batch`), and the idempotent save-to-comments helpers
-  (`apply_summary_to_comments` / `regular_comments`). Everything here is safe
-  to run in a `ThreadedJob`.
+  (`run_batch`), the series-context helpers (`build_series_context` /
+  `format_series_context` / `extract_ai_block` / `order_books_for_series`), and
+  the idempotent save-to-comments helpers (`apply_summary_to_comments` /
+  `regular_comments`). Everything here is safe to run in a `ThreadedJob`.
 - `action.py` — toolbar action + quick-action menu; drives the background
   extract / map-reduce / batch jobs and opens the dialogs. A single selected
   book opens the chat dialog; two or more go through the batch flow.
@@ -162,6 +163,70 @@ error, is_excerpt, saved`. `run_batch` scales each book's sub-progress (e.g.
 the map phase) into its slot of the overall 0..1 range via
 `_ScaledNotifications`, so the job progress bar is monotonic.
 
+## Series context (prior-book summaries)
+
+When summarizing a book that is part of a **series**, the AI is given the
+summaries of the **earlier books** in that series as reference context, so each
+summary can keep continuity (characters, plot, setting). Works in **both** the
+batch flow and the single-book flow. Prefs (in `config.py`, Customize has a
+"Series context" group box): `series_context` (bool, default **True** — the
+master switch), `series_context_chars` (int, default 20000 — total budget of
+earlier-summary characters), `series_context_max_books` (int, default 0 =
+unlimited, capped by the character budget).
+
+Helpers in `content.py` (all GUI-free):
+
+- `extract_ai_block(comments)` — the inverse of `apply_summary_to_comments`:
+  returns the AI summary stored between the `<!-- AskAI:begin/end -->` markers
+  as markdown (via `comments_as_markdown`), or `None`. This is how saved
+  summaries are read back as context.
+- `build_series_context(db, book_id, max_chars, max_books=0)` — builds the
+  context for `book_id` from **saved** summaries only. Returns
+  `(entries, position)`: `entries` is a list of `(position, title, summary)`
+  for the earlier books (chronological, budget-trimmed) and `position` is the
+  book's 1-based position in the series (`None` if it has no series). Uses
+  `db.books_in_series_of(book_id, index_is_id=True)` (returns `[]` when the
+  book has no series; otherwise all series ids sorted by `series_index`).
+- `_apply_budget(entries, max_chars, max_books)` — trims to the budget,
+  dropping from the **oldest** so the most recent context is kept. Returns a
+  new list; it must not mutate its input.
+- `format_series_context(series_name, entries, book_position)` — renders the
+  block that is prepended to the prompt. Each earlier book is labelled
+  `### Book N — <title>` where **N is the book's real series position** (not
+  its position within the included context), so the numbers stay accurate even
+  when the oldest are dropped for budget. Returns `''` when there are no
+  entries.
+- `_series_index(mi)` / `order_books_for_series(books)` — reorders a batch
+  selection so books in the same series form a contiguous block in
+  `series_index` order (series groups appear in first-appearance order;
+  non-series books keep their selection position). `_series_index` uses
+  `getattr(mi, 'series_index', None)` so a missing attribute never breaks it.
+
+**Batch flow** (`run_batch`): books are reordered with
+`order_books_for_series`. Each series' **saved** summaries are precomputed once
+into `saved` (series name → `{position: (title, summary)}` for *all* of the
+series' books, so a book's context can draw on earlier books not in the
+selection). As books are processed, a fresh summary is added to `in_memory`
+(series name → `{position: (title, summary)}`). A book at position P gets
+context from `in_memory.get(p) or saved.get(p)` for each `p in range(1, P)` —
+so an in-memory (this-run) summary **takes precedence** over a saved one for a
+book that is in the selection. The block is built with
+`format_series_context` and passed to `summarize_text`.
+
+**Single-book flow**: `action.prepare_and_open` loads the context
+synchronously (reading a few comments is cheap) via
+`content.build_series_context` and stores the `entries` on
+`BookContext.series_context`. `AskAIPanel.create_initial_messages` recomputes
+the position with `db.books_in_series_of` and formats the block with
+`content.format_series_context`, then passes it to the prompt builders.
+
+**Injection point**: the series block is prepended to the **single-shot and
+reduce** system messages only (`build_single_shot_messages` /
+`build_reduce_messages` each take a `series_context=''` param, threaded through
+`summarize_text`). It is **not** added to the per-chunk map prompts — the map
+phase summarizes the current book's own text, and continuity belongs to the
+final combine.
+
 ## Questions (not just summaries)
 
 The plugin answers **any** free-form question about the book, not only the
@@ -202,17 +267,41 @@ regular comments:
 ```
 
 - `content.apply_summary_to_comments(existing, summary, mode)` builds the new
-  value. The summary (markdown) is converted to HTML via
-  `content._markdown_to_html` — the comments field is HTML, so this is what
-  makes headings and line breaks render (single newlines become `<br>`).
-  `mode` is the `save_mode` pref: `prepend` (default, AI block on top),
-  `append` (mirror image), or `replace` (the block only). Re-running replaces
-  the block between the markers and leaves the regular comments (after the
-  `<hr>`) untouched — `content.regular_comments(existing)` strips a previous
-  block (and its adjacent `<hr>`) to recover them.
+  value. The summary (markdown) is converted to HTML by
+  `content._markdown_to_html` so headings and line breaks render (the comments
+  field is HTML). `mode` is the `save_mode` pref: `prepend` (default, AI block
+  on top), `append` (mirror image), or `replace` (the block only). Re-running
+  replaces the block between the markers and leaves the regular comments (after
+  the `<hr>`) untouched — `content.regular_comments(existing)` strips a previous
+  block (and its adjacent `<hr>`) to recover them. The `<hr>` is matched by
+  `content._HR_RE`, which tolerates the `<hr>`/`<hr/>`/`<hr />` variations that
+  calibre/Qt may normalize it to, so re-runs clean the rule up reliably.
+- **`content._markdown_to_html` and the `nl2br` gotcha.** It uses calibre's own
+  `calibre.library.comments.markdown()` (the same converter the calibre GUI uses
+  for the comments field) and then rewrites single newlines inside `<p>` blocks
+  into `<br />`. **Do not "simplify" this to the `nl2br` markdown extension**:
+  `Markdown(extensions=['nl2br'])` raises `ModuleNotFoundError: No module named
+  'nl2br'` in the frozen calibre build (the extension module is not bundled),
+  which is exactly why the post-processing approach exists. The plain converter
+  alone keeps single newlines as literal `\n` inside `<p>`, which render as a
+  space — the original "no line breaks" bug.
 - The single-book flow saves the conversation via
   `ConversationHistory.format_llm_note(assistant_name, title)` and then runs it
   through `apply_summary_to_comments` too, so both flows share the same
   idempotent logic and honour the `save_mode` pref.
 - After writing, `db.new_api.set_metadata(book_id, mi)` then
   `self.gui.library_view.model().refresh_ids((book_id,))`.
+
+## Debugging
+
+- **Stale plugin load is the first suspect.** When a change "doesn't take
+  effect" in the running GUI (a button does nothing, a new column is missing, a
+  pref is ignored), calibre is usually still running the previously-loaded copy
+  of the plugin — the rebuilt zip has not been picked up. Reinstall the zip
+  (`build.cmd`) and **restart calibre** (or relaunch `calibre-debug -g`) before
+  assuming there is a code bug. The batch auto-save "did nothing" for exactly
+  this reason: the code was correct and a reload fixed it.
+- The `ThreadedJob`/`Dispatcher` callback path (e.g. `action.batch_done`) only
+  runs in the live GUI event loop, so it cannot be exercised headlessly. To
+  trace a value through it, add temporary `print(...)` lines at each hand-off
+  and read them in the `calibre-debug -g` console.

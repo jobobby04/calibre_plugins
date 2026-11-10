@@ -37,7 +37,8 @@ class BookContext:
     """Carries the prepared book content into the dialog."""
 
     def __init__(self, mi, mode, content=None, partials=None,
-                 is_excerpt=False, fmt=None, raw_text=None):
+                 is_excerpt=False, fmt=None, raw_text=None,
+                 series_context=None):
         self.mi = mi
         self.mode = mode            # 'single' or 'map_reduce'
         self.content = content      # for 'single'
@@ -45,6 +46,9 @@ class BookContext:
         self.is_excerpt = is_excerpt
         self.fmt = fmt
         self.raw_text = raw_text    # for 'map_reduce' (input to the map phase)
+        # (position, title, summary) for earlier books in the series, for
+        # continuity. Empty/None when the book has no series or no context.
+        self.series_context = series_context
 
 
 class Action(ActionData):
@@ -283,13 +287,21 @@ class AskAIPanel(ConverseWidget):
         prefs = get_prefs()
         lang = self.get_language_instruction()
         allowed = get_allowed_fields()
+        series_ctx = ''
+        if ctx.series_context:
+            db = self.gui.current_db
+            series_ids = db.books_in_series_of(self.book_id, index_is_id=True)
+            position = series_ids.index(self.book_id) + 1 \
+                if self.book_id in series_ids else None
+            series_ctx = content.format_series_context(
+                ctx.mi.series or '', ctx.series_context, position)
         if ctx.mode == 'map_reduce':
             partials = content.cap_partials(ctx.partials, prefs['max_chars'])
             yield from content.build_reduce_messages(
-                ctx.mi, partials, allowed, lang)
+                ctx.mi, partials, allowed, lang, series_ctx)
         else:
             yield from content.build_single_shot_messages(
-                ctx.mi, ctx.content, ctx.is_excerpt, allowed, lang)
+                ctx.mi, ctx.content, ctx.is_excerpt, allowed, lang, series_ctx)
         yield ChatMessage(action_prompt)
 
     def prompt_text_for_action(self, action):
