@@ -79,12 +79,16 @@ AI (`calibre/gui2/dialogs/llm_book.py`):
 ## Architecture
 
 - `content.py` — GUI-free: format picking, text extraction, sampling, chunking,
-  prompt building, and the map-reduce engine (`run_map_reduce`). Everything here
-  is safe to run in a `ThreadedJob`.
+  prompt building, the map-reduce engine (`run_map_reduce`), the batch engine
+  (`run_batch`), and the idempotent save-to-comments helpers
+  (`apply_summary_to_comments` / `regular_comments`). Everything here is safe
+  to run in a `ThreadedJob`.
 - `action.py` — toolbar action + quick-action menu; drives the background
-  extract / map-reduce jobs and opens the dialog.
-- `dialog.py` — `ConverseWidget` subclass (`AskAIPanel`) + settings dialog
-  + Save-to-comments.
+  extract / map-reduce / batch jobs and opens the dialogs. A single selected
+  book opens the chat dialog; two or more go through the batch flow.
+- `dialog.py` — `ConverseWidget` subclass (`AskAIPanel`) + settings dialog +
+  Save-to-comments, plus `BatchSetupDialog` and `BatchResultsDialog` for the
+  multi-book flow.
 - `config.py` — `JSONConfig('plugins/Ask AI')` + the Customize widget.
 
 ## Large books: the task job flow
@@ -123,6 +127,41 @@ separately-formatted `intro`/`goal`/`tail` pieces — keep them formatted
 individually (a single `%`-format over the whole string breaks on the `%d`
 in the intro).
 
+## Multi-book (batch)
+
+Selecting **two or more** books runs the batch flow instead of the single-book
+chat (the chat is kept for a single book, with follow-ups):
+
+1. `action.ask_ai_with_action` collects **all** selected rows. One book →
+   `start()` (the chat). Two or more → `start_batch()`.
+2. `BatchSetupDialog` shows "N books", a task combo (from `current_actions()`,
+   disabled ones filtered, plus a "Custom prompt…" entry) and an editable
+   `QPlainTextEdit` prefilled with the chosen action's template
+   (`{title}`/`{authors}`/`{series}`). **The text box is the source of truth.**
+   It also has a "Save to comments automatically" checkbox (default on) and a
+   one-line cost note. `get_result()` returns `(prompt_template, auto_save)`.
+3. `action.run_batch_job` runs `content.run_batch(...)` as a `ThreadedJob`
+   (type `ask-ai-batch`). It processes the books **sequentially**: per book,
+   `get_book_text` → single-shot or map-reduce (the same strategy logic as the
+   single-book flow, via `content.summarize_text`) → summarize with the
+   per-book-formatted prompt (`content.format_prompt`). A per-book failure
+   (no extractable format, AI error, cancellation) is recorded on that book's
+   `BookResult` (`status='error'`) and does **not** abort the batch.
+4. `action.batch_done` opens `BatchResultsDialog` — a `QTableWidget`
+   (Saved · Title · Author · Status · Length) over a read-only `QTextBrowser` detail
+   pane in a vertical `QSplitter`, with **Save selected** / **Save all** /
+   **Close**. The Saved column shows a ✓ once a book's summary is written.
+   **Save selected** saves the selected rows and updates the checkmarks (the
+   dialog stays open); **Save all** saves every successful result and closes
+   the dialog. If `auto_save` was on, all successful results are saved when the
+   dialog opens (the table still opens for review, already checked). Saving uses the same
+   idempotent `apply_summary_to_comments` logic as the single-book flow.
+
+`content.BookResult` carries `book_id, title, authors, fmt, summary, status,
+error, is_excerpt, saved`. `run_batch` scales each book's sub-progress (e.g.
+the map phase) into its slot of the overall 0..1 range via
+`_ScaledNotifications`, so the job progress bar is monotonic.
+
 ## Questions (not just summaries)
 
 The plugin answers **any** free-form question about the book, not only the
@@ -147,7 +186,33 @@ max-tokens pref to "fix" it.
 
 ## Save to comments
 
-`ConversationHistory.format_llm_note(assistant_name, title)` renders the
-conversation as a markdown note. Write it to `mi.comments` (append or replace
-per the `save_mode` pref) via `db.new_api.set_metadata(book_id, mi)`, then
-`self.gui.library_view.model().refresh_ids((book_id,))`.
+Saving writes the AI output into the book's `comments` field, wrapped in
+HTML-comment markers so it is **idempotent** and stays separate from the
+regular comments:
+
+```
+<!-- AskAI:begin -->
+<h2>AI Summary</h2>
+<p>…the AI summary, converted to HTML…</p>
+<!-- AskAI:end -->
+
+<hr>
+
+<existing regular comments>
+```
+
+- `content.apply_summary_to_comments(existing, summary, mode)` builds the new
+  value. The summary (markdown) is converted to HTML via
+  `content._markdown_to_html` — the comments field is HTML, so this is what
+  makes headings and line breaks render (single newlines become `<br>`).
+  `mode` is the `save_mode` pref: `prepend` (default, AI block on top),
+  `append` (mirror image), or `replace` (the block only). Re-running replaces
+  the block between the markers and leaves the regular comments (after the
+  `<hr>`) untouched — `content.regular_comments(existing)` strips a previous
+  block (and its adjacent `<hr>`) to recover them.
+- The single-book flow saves the conversation via
+  `ConversationHistory.format_llm_note(assistant_name, title)` and then runs it
+  through `apply_summary_to_comments` too, so both flows share the same
+  idempotent logic and honour the `save_mode` pref.
+- After writing, `db.new_api.set_metadata(book_id, mi)` then
+  `self.gui.library_view.model().refresh_ids((book_id,))`.

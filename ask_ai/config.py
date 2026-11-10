@@ -20,7 +20,7 @@ DEFAULTS = {
     'sampling': 'even',
     'sample_segments': 12,
     'chunk_chars': 100000,
-    'save_mode': 'append',
+    'save_mode': 'prepend',
 }
 
 plugin_prefs.defaults.update(DEFAULTS)
@@ -80,9 +80,12 @@ class ConfigWidget(QWidget):
         form.addRow(_('Size of each part (characters):'), self.chunk_chars)
 
         self.save_mode = QComboBox(self)
-        self.save_mode.addItem(_('Append to the book comments'), 'append')
+        self.save_mode.addItem(_('Put the AI summary at the top (recommended)'), 'prepend')
+        self.save_mode.addItem(_('Append the AI summary to the bottom'), 'append')
         self.save_mode.addItem(_('Replace the book comments'), 'replace')
         self.save_mode.setCurrentIndex(max(0, self.save_mode.findData(c['save_mode'])))
+        self.save_mode.setToolTip(_('How the AI summary is combined with the existing book comments. '
+                                    'Re-saving replaces the previous AI summary and leaves the rest untouched.'))
         form.addRow(_('Save to comments:'), self.save_mode)
 
         outer.addWidget(box)

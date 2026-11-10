@@ -9,11 +9,14 @@ streaming, quick actions, provider configuration and cost display for free.
 
 from functools import lru_cache
 
-from qt.core import (QAbstractItemView, QDialogButtonBox, QLabel, QListWidget,
-                     QListWidgetItem, QSize, Qt, QVBoxLayout, QWidget)
+from qt.core import (QAbstractItemView, QCheckBox, QComboBox,
+                     QDialogButtonBox, QFormLayout, QHeaderView, QLabel,
+                     QListWidget, QListWidgetItem, QPlainTextEdit, QSize,
+                     QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser,
+                     Qt, QVBoxLayout, QWidget)
 
 from calibre.ai import ChatMessage
-from calibre.gui2 import gprefs
+from calibre.gui2 import error_dialog, gprefs
 from calibre.gui2.dialogs.confirm_delete import confirm
 from calibre.gui2.llm import (ActionData, ConverseWidget,
                               LLMActionsSettingsWidget, LLMSettingsDialogBase,
@@ -299,7 +302,6 @@ class AskAIPanel(ConverseWidget):
             self.save_to_comments)
 
     def save_to_comments(self):
-        from calibre.gui2 import error_dialog
         text = self.conversation_history.format_llm_note(
             self.assistant_name, self.NOTE_TITLE)
         if not text:
@@ -309,11 +311,8 @@ class AskAIPanel(ConverseWidget):
         prefs = get_prefs()
         db = self.gui.current_db
         mi = db.new_api.get_metadata(self.book_id)
-        if prefs['save_mode'] == 'replace':
-            mi.comments = text
-        else:
-            existing = mi.comments or ''
-            mi.comments = (existing + '\n\n' + text) if existing else text
+        mi.comments = content.apply_summary_to_comments(
+            mi.comments, text, prefs['save_mode'])
         db.new_api.set_metadata(self.book_id, mi)
         self.gui.library_view.model().refresh_ids((self.book_id,))
         self.gui.status_bar.show_message(_('Summary saved to the book comments.'), 3000)
@@ -343,3 +342,214 @@ class AskAIDialog(Dialog):
 
     def sizeHint(self):
         return QSize(600, 750)
+
+
+class BatchSetupDialog(Dialog):
+    """Choose the prompt and options before summarizing several books."""
+
+    def __init__(self, books, action=None, parent=None):
+        # books: a list of (book_id, mi) pairs.
+        self.books = books
+        self.action = action
+        super().__init__(
+            name='ask-ai-batch-setup',
+            title=_('Summarize {} books').format(len(books)),
+            parent=parent,
+            default_buttons=QDialogButtonBox.StandardButton.Ok |
+                            QDialogButtonBox.StandardButton.Cancel,
+        )
+
+    def setup_ui(self):
+        l = QVBoxLayout(self)
+        la = QLabel(_('{} books will be summarized, one by one, with the '
+                      'prompt below.').format(len(self.books)))
+        la.setWordWrap(True)
+        l.addWidget(la)
+
+        form = QFormLayout()
+        self.combo = QComboBox(self)
+        for ac in sorted(current_actions(),
+                         key=lambda a: primary_sort_key(a.human_name)):
+            self.combo.addItem(ac.human_name, ac)
+        self.combo.addItem(_('Custom prompt…'), None)
+        form.addRow(_('Task:'), self.combo)
+
+        self.text = QPlainTextEdit(self)
+        self.text.setMinimumHeight(110)
+        self.text.setPlaceholderText(
+            _('Type a prompt. {title}, {authors} and {series} are replaced '
+              'for each book.'))
+        form.addRow(_('Prompt:'), self.text)
+        l.addLayout(form)
+
+        self.chk_save = QCheckBox(
+            _('Save the results to the book comments automatically'), self)
+        self.chk_save.setChecked(True)
+        l.addWidget(self.chk_save)
+
+        note = QLabel(_('Each book is summarized separately, so this batch '
+                        'will make at least {} AI calls; long books use more.')
+                      .format(len(self.books)))
+        note.setWordWrap(True)
+        l.addWidget(note)
+
+        # Select the initial task (the one chosen from the menu, if any, else
+        # the first) and prefill the prompt from it.
+        if self.action is not None:
+            for i in range(self.combo.count()):
+                ac = self.combo.itemData(i)
+                if ac is not None and ac.name == self.action.name:
+                    self.combo.setCurrentIndex(i)
+                    break
+        ac = self.combo.currentData()
+        if ac is not None:
+            self.text.setPlainText(ac.prompt_template)
+        self.combo.currentIndexChanged.connect(self.combo_changed)
+
+        l.addWidget(self.bb)
+
+    def combo_changed(self, index):
+        ac = self.combo.itemData(index)
+        if ac is not None:
+            self.text.setPlainText(ac.prompt_template)
+
+    def accept(self):
+        if not self.text.toPlainText().strip():
+            error_dialog(self, _('No prompt'),
+                         _('Choose a task or type a prompt first.'), show=True)
+            return
+        super().accept()
+
+    def get_result(self):
+        """Return ``(prompt_template, auto_save)``."""
+        return self.text.toPlainText().strip(), self.chk_save.isChecked()
+
+    def sizeHint(self):
+        return QSize(520, 340)
+
+
+class BatchResultsDialog(Dialog):
+    """Table of per-book batch results, with a detail pane and save buttons."""
+
+    def __init__(self, results, gui, auto_save=False, parent=None):
+        self.results = results
+        self.gui = gui
+        self.auto_save = auto_save
+        super().__init__(
+            name='ask-ai-batch-results',
+            title=_('Batch results'),
+            parent=parent,
+            default_buttons=QDialogButtonBox.StandardButton.Close,
+        )
+
+    def setup_ui(self):
+        l = QVBoxLayout(self)
+        self.splitter = QSplitter(Qt.Orientation.Vertical, self)
+
+        self.table = QTableWidget(0, 5, self.splitter)
+        self.table.setHorizontalHeaderLabels(
+            [_('Saved'), _('Title'), _('Author'), _('Status'), _('Length')])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.itemSelectionChanged.connect(self.update_detail)
+
+        self.detail = QTextBrowser(self.splitter)
+        self.detail.setOpenExternalLinks(False)
+
+        self.splitter.addWidget(self.table)
+        self.splitter.addWidget(self.detail)
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 2)
+        l.addWidget(self.splitter)
+        l.addWidget(self.bb)
+
+        self.btn_save_selected = self.bb.addButton(
+            _('Save selected'), QDialogButtonBox.ButtonRole.ActionRole)
+        self.btn_save_selected.clicked.connect(self.save_selected)
+        self.btn_save_all = self.bb.addButton(
+            _('Save all'), QDialogButtonBox.ButtonRole.ActionRole)
+        self.btn_save_all.clicked.connect(self.save_all)
+
+        for i, r in enumerate(self.results):
+            self.table.insertRow(i)
+            self.set_saved_mark(i, r.saved)
+            self.table.setItem(i, 1, QTableWidgetItem(r.title))
+            self.table.setItem(i, 2, QTableWidgetItem(r.authors))
+            status = QTableWidgetItem(self.status_text(r))
+            if r.status == 'error':
+                status.setToolTip(r.error)
+            self.table.setItem(i, 3, status)
+            self.table.setItem(i, 4, QTableWidgetItem(str(len(r.summary))))
+
+        if self.results:
+            self.table.selectRow(0)
+
+        if self.auto_save:
+            self._save_results(range(len(self.results)))
+
+    def set_saved_mark(self, row, saved):
+        item = QTableWidgetItem('✓' if saved else '')
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        item.setToolTip(_('Saved to the book comments') if saved else '')
+        self.table.setItem(row, 0, item)
+
+    def status_text(self, r):
+        return _('Error') if r.status == 'error' else _('Done')
+
+    def update_detail(self):
+        rows = {i.row() for i in self.table.selectedIndexes()}
+        if not rows:
+            self.detail.clear()
+            return
+        r = self.results[min(rows)]
+        if r.status == 'error':
+            self.detail.setPlainText(r.error)
+        else:
+            self.detail.setMarkdown(r.summary)
+
+    def save_selected(self):
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        if not rows:
+            error_dialog(self, _('Nothing selected'),
+                         _('Select one or more rows to save.'), show=True)
+            return
+        self._save_results(rows)
+
+    def save_all(self):
+        self._save_results(range(len(self.results)))
+        self.accept()
+
+    def _save_results(self, indices):
+        prefs = get_prefs()
+        db = self.gui.current_db
+        saved = []
+        for i in indices:
+            r = self.results[i]
+            if r.status != 'ok' or r.saved:
+                continue
+            mi = db.new_api.get_metadata(r.book_id)
+            mi.comments = content.apply_summary_to_comments(
+                mi.comments, r.summary, prefs['save_mode'])
+            db.new_api.set_metadata(r.book_id, mi)
+            r.saved = True
+            saved.append(r)
+        if saved:
+            self.gui.library_view.model().refresh_ids(
+                tuple(r.book_id for r in saved))
+            for i, r in enumerate(self.results):
+                self.set_saved_mark(i, r.saved)
+            self.gui.status_bar.show_message(
+                _('Summaries saved to the book comments.'), 3000)
+
+    def sizeHint(self):
+        return QSize(720, 520)

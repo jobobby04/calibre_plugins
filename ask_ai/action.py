@@ -5,7 +5,9 @@
 Toolbar action for the Ask AI plugin.
 
 Wires the toolbar button and its quick-action menu to the background
-extraction / map-reduce jobs and the dialog.
+extraction / map-reduce jobs and the dialog. A single selected book opens the
+chat dialog; two or more go through the batch flow (setup dialog, a
+background batch job, and a results table).
 """
 
 from functools import partial
@@ -57,12 +59,64 @@ class AskAIAction(InterfaceAction):
             d = error_dialog(self.gui, _('Cannot ask AI'), _('No book selected'))
             d.exec()
             return
-        # v1 is single-book: use the first selected book.
-        book_id = self.gui.library_view.model().id(rows[0])
-        self.start(book_id, action)
+        book_ids = [self.gui.library_view.model().id(r) for r in rows]
+        if len(book_ids) == 1:
+            # A single book keeps the chat dialog (with follow-ups).
+            self.start(book_ids[0], action)
+        else:
+            # Two or more books go through the batch flow (setup dialog,
+            # background job, results table).
+            self.start_batch(book_ids, action)
 
     def ask_ai(self):
         self.ask_ai_with_action()
+
+    def start_batch(self, book_ids, action):
+        from calibre_plugins.ask_ai.dialog import BatchSetupDialog
+        db = self.gui.current_db
+        books = [(bid, db.new_api.get_metadata(bid)) for bid in book_ids]
+        d = BatchSetupDialog(books, action, parent=self.gui)
+        if not d.exec():
+            return
+        prompt_template, auto_save = d.get_result()
+        self.run_batch_job(books, prompt_template, auto_save)
+
+    def run_batch_job(self, books, prompt_template, auto_save):
+        from calibre.ai import AICapabilities
+        from calibre.ai.prefs import plugin_for_purpose
+        from calibre_plugins.ask_ai.dialog import get_allowed_fields
+        plugin = plugin_for_purpose(AICapabilities.text_to_text)
+        if plugin is None or not plugin.is_ready_for_use:
+            error_dialog(self.gui, _('No AI provider'),
+                         _('No AI provider is configured. Open the AI settings to '
+                           'configure one, then try again.'), show=True)
+            return
+        prefs = get_prefs()
+        allowed = get_allowed_fields()
+        db = self.gui.current_db
+
+        def do_batch(abort, log, notifications):
+            return content.run_batch(db, books, prompt_template, prefs, plugin,
+                                     allowed, abort=abort, log=log,
+                                     notifications=notifications)
+
+        job = ThreadedJob(
+            'ask-ai-batch',
+            _('Summarizing {} books').format(len(books)),
+            do_batch, (), {},
+            Dispatcher(partial(self.batch_done, auto_save)),
+        )
+        self.gui.job_manager.run_threaded_job(job)
+        self.gui.status_bar.show_message(_('Summarizing {} books…').format(len(books)), 2000)
+
+    def batch_done(self, auto_save, job):
+        if job.failed:
+            self.gui.job_exception(job, dialog_title=_('Batch summarization failed'))
+            return
+        from calibre_plugins.ask_ai.dialog import BatchResultsDialog
+        d = BatchResultsDialog(job.result, self.gui, auto_save=auto_save,
+                               parent=self.gui)
+        d.exec()
 
     def start(self, book_id, action):
         db = self.gui.current_db

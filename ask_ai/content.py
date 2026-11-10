@@ -10,10 +10,12 @@ the GUI, so it can run in a worker thread.
 """
 
 import os
+import re
 
 from calibre.ai import ChatMessage, ChatMessageType
 from calibre.ai.utils import StreamedResponseAccumulator
 from calibre.library.comments import comments_as_markdown
+from calibre.utils.localization import _
 
 # Preferred order of formats to extract text from. Comic formats are image
 # collections with no meaningful text and are skipped entirely.
@@ -282,3 +284,240 @@ def run_map_reduce(mi, text, chunk_chars, plugin, allowed_fields,
         if log is not None:
             log('Summarized part %d of %d' % (i + 1, total))
     return partials
+
+
+# ---------------------------------------------------------------------------
+# Save to comments (idempotent)
+# ---------------------------------------------------------------------------
+
+# HTML-comment markers delimiting the AI block inside the book's comments.
+# They are invisible in calibre's rendered comments and give a reliable
+# boundary: re-running replaces the block between the markers and leaves the
+# regular comments (separated by an <hr> rule) untouched.
+BEGIN_MARKER = '<!-- AskAI:begin -->'
+END_MARKER = '<!-- AskAI:end -->'
+SEPARATOR = '<hr>'
+
+# Matches an <hr> rule line, tolerating the variations calibre/Qt may normalize
+# it to (<hr>, <hr/>, <hr />).
+_HR_RE = re.compile(r'^<hr\s*/?>$', re.IGNORECASE)
+
+
+def _strip_separator(text, side):
+    """Remove a single <hr> rule line at the given edge of text."""
+    text = (text or '').strip()
+    if not text:
+        return ''
+    lines = text.split('\n')
+    if side == 'end' and _HR_RE.match(lines[-1].strip()):
+        lines = lines[:-1]
+    elif side == 'start' and _HR_RE.match(lines[0].strip()):
+        lines = lines[1:]
+    return '\n'.join(lines).strip()
+
+
+def regular_comments(existing):
+    """
+    Return the regular (non-AI) part of an existing comments field.
+
+    If the comments contain an AskAI block (between the HTML-comment markers)
+    it is removed — along with the <hr> separator next to it — and the
+    remaining regular comments are returned. Comments without a block are
+    returned unchanged (stripped).
+    """
+    existing = (existing or '').strip()
+    b = existing.find(BEGIN_MARKER)
+    e = existing.find(END_MARKER)
+    if b == -1 or e == -1 or e < b:
+        return existing
+    before = _strip_separator(existing[:b], 'end')
+    after = _strip_separator(existing[e + len(END_MARKER):], 'start')
+    return '\n\n'.join(p for p in (before, after) if p)
+
+
+def _markdown_to_html(text):
+    """Convert markdown to HTML, preserving single line breaks as <br> tags.
+
+    The comments field is HTML, so the AI's markdown must be converted before
+    it is stored. calibre's ``markdown()`` keeps single newlines as literal
+    ``\\n`` inside a ``<p>`` (which render as a space), so those are turned
+    into ``<br>`` afterwards to make the line breaks show.
+    """
+    from calibre.library.comments import markdown
+    html = markdown(text)
+    return re.sub(
+        r'(<p[^>]*>)(.*?)(</p>)',
+        lambda m: m.group(1) + m.group(2).replace('\n', '<br />') + m.group(3),
+        html, flags=re.DOTALL)
+
+
+def apply_summary_to_comments(existing, summary, mode='prepend'):
+    """
+    Build the new value for the book's comments field with the AI summary
+    applied.
+
+    The summary (markdown) is converted to HTML — the comments field is HTML,
+    so this is what makes headings and line breaks render — and wrapped in the
+    AskAI markers so that re-running replaces the previous AI block while
+    leaving the regular comments untouched. ``mode`` is 'prepend' (AI block on
+    top, then <hr>, then the regular comments), 'append' (the mirror image) or
+    'replace' (the AI block only).
+    """
+    body = _markdown_to_html(_('## AI Summary') + '\n' + summary.strip())
+    block = '%s\n%s\n%s' % (BEGIN_MARKER, body, END_MARKER)
+    regular = regular_comments(existing)
+    if mode == 'replace' or not regular:
+        return block
+    if mode == 'append':
+        return regular + '\n\n' + SEPARATOR + '\n\n' + block
+    return block + '\n\n' + SEPARATOR + '\n\n' + regular
+
+
+# ---------------------------------------------------------------------------
+# Batch summarization (runs in a worker thread)
+# ---------------------------------------------------------------------------
+
+class BookResult:
+    """The outcome of summarizing one book in a batch."""
+
+    def __init__(self, book_id, title, authors, fmt=None, summary='',
+                 status='ok', error='', is_excerpt=False, saved=False):
+        self.book_id = book_id
+        self.title = title
+        self.authors = authors
+        self.fmt = fmt
+        self.summary = summary
+        self.status = status      # 'ok' or 'error'
+        self.error = error
+        self.is_excerpt = is_excerpt
+        self.saved = saved
+
+
+class _ScaledNotifications:
+    """Remap (frac, msg) progress notifications into a sub-range of 0..1."""
+
+    def __init__(self, queue, base, span):
+        self.queue = queue
+        self.base = base
+        self.span = span
+
+    def put(self, item):
+        frac, msg = item
+        self.queue.put((min(1.0, self.base + frac * self.span), msg))
+
+
+def language_instruction():
+    """The 'respond in the current language' instruction, if that is enabled."""
+    from calibre.ai.prefs import prefs as aiprefs
+    if aiprefs()['llm_localized_results'] != 'always':
+        return ''
+    from calibre.utils.localization import ui_language_as_english
+    lang = ui_language_as_english()
+    return 'If you can speak in %s, then respond in %s.' % (lang, lang)
+
+
+def format_prompt(template, mi):
+    """Fill the {title}/{authors}/{series} placeholders of a prompt template.
+
+    Falls back to the raw template if it contains a placeholder that cannot be
+    filled (e.g. a stray brace), so a typo never aborts the batch.
+    """
+    try:
+        return template.format(
+            title=mi.title,
+            authors=mi.format_authors(),
+            series=mi.series or '',
+        )
+    except (KeyError, IndexError, ValueError):
+        return template
+
+
+def summarize_text(mi, text, prompt, prefs, plugin, allowed_fields,
+                   language_instruction='', abort=None, log=None,
+                   notifications=None):
+    """
+    Summarize ``text`` (the full book text) with ``prompt``.
+
+    Uses the same single-shot / map-reduce strategy as the single-book flow
+    (see the ``strategy`` pref). Returns ``(summary, is_excerpt)`` where
+    ``is_excerpt`` is True when the book was too long to send whole and was
+    sampled. Runs in a worker thread; raises on cancellation or AI error.
+    """
+    strategy = prefs['strategy']
+    needs_map = strategy == 'map_reduce' or (
+        strategy == 'auto' and len(text) > prefs['max_chars'])
+    is_excerpt = False
+    if needs_map:
+        partials = run_map_reduce(mi, text, prefs['chunk_chars'], plugin,
+                                  allowed_fields, prompt,
+                                  abort=abort, log=log,
+                                  notifications=notifications)
+        partials = cap_partials(partials, prefs['max_chars'])
+        messages = list(build_reduce_messages(mi, partials, allowed_fields,
+                                              language_instruction))
+    else:
+        content_text, is_excerpt = sample_text(text, prefs['max_chars'],
+                                               prefs['sampling'],
+                                               prefs['sample_segments'])
+        messages = list(build_single_shot_messages(
+            mi, content_text, is_excerpt, allowed_fields,
+            language_instruction))
+    messages.append(ChatMessage(prompt))
+    acc = StreamedResponseAccumulator()
+    for res in plugin.text_chat(messages):
+        if abort is not None and abort.is_set():
+            raise InterruptedError('Summarization was cancelled')
+        if res.exception is not None:
+            details = res.error_details or ''
+            raise Exception('AI error: %s %s' % (res.exception, details))
+        acc.accumulate(res)
+    acc.finalize()
+    return acc.all_content.strip(), is_excerpt
+
+
+def run_batch(db, books, prompt_template, prefs, plugin, allowed_fields,
+              abort=None, log=None, notifications=None):
+    """
+    Summarize each book in ``books`` (a list of ``(book_id, mi)`` pairs)
+    sequentially with ``prompt_template``.
+
+    Returns a list of :class:`BookResult`, one per book, in the same order.
+    A failure on one book (no extractable format, AI error, cancellation, ...)
+    is recorded on that book's result and does not stop the batch. Runs in a
+    worker thread.
+    """
+    lang = language_instruction()
+    results = []
+    total = len(books)
+    for i, (book_id, mi) in enumerate(books):
+        if abort is not None and abort.is_set():
+            results.append(BookResult(book_id, mi.title, mi.format_authors(),
+                                      status='error', error='Cancelled'))
+            continue
+        title, authors = mi.title, mi.format_authors()
+        # Scale this book's sub-progress (e.g. the map phase) into its slot of
+        # the overall 0..1 range.
+        base, span = i / total, 1 / total
+        notes = (_ScaledNotifications(notifications, base, span)
+                 if notifications is not None else None)
+        try:
+            text, fmt = get_book_text(db, book_id)
+            prompt = format_prompt(prompt_template, mi)
+            summary, is_excerpt = summarize_text(
+                mi, text, prompt, prefs, plugin, allowed_fields, lang,
+                abort=abort, log=log, notifications=notes)
+            results.append(BookResult(book_id, title, authors, fmt=fmt,
+                                      summary=summary, status='ok',
+                                      is_excerpt=is_excerpt))
+        except InterruptedError:
+            results.append(BookResult(book_id, title, authors,
+                                      status='error', error='Cancelled'))
+        except Exception as e:
+            results.append(BookResult(book_id, title, authors,
+                                      status='error', error=str(e)))
+        if notifications is not None:
+            notifications.put((i + 1) / total,
+                              'Done %d of %d books' % (i + 1, total))
+        if log is not None:
+            log('Book %d of %d: %s' % (i + 1, total, title))
+    return results

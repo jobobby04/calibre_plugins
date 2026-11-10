@@ -16,17 +16,23 @@ it to the AI, so the answer reflects what the book really says.
 
 ## How to use
 
-1. Select a book in the library.
+1. Select one or more books in the library.
 2. Click the **Ask AI** toolbar button, or open its menu to pick a
    specific quick action (Summary, Detailed summary, Chapter by chapter,
    Logline, Themes & analysis).
-3. The book's text is extracted in the background. Depending on the book's
-   length and your *content strategy* setting, it is either sent in one prompt
-   or split into parts that are summarized individually and then combined
-   (map-reduce).
-4. A chat dialog opens with the AI's answer. You can ask follow-up questions,
-   run other quick actions, copy the result, or **Save to comments** to write
-   the summary into the book's `comments` field.
+3. **Single book:** the book's text is extracted in the background. Depending
+   on the book's length and your *content strategy* setting, it is either sent
+   in one prompt or split into parts that are summarized individually and then
+   combined (map-reduce). A chat dialog opens with the AI's answer. You can ask
+   follow-up questions, run other quick actions, copy the result, or
+   **Save to comments** to write the summary into the book's `comments` field.
+4. **Several books:** a setup dialog lets you pick the task (a quick action or
+   a custom prompt, applied to every book) and choose whether to save the
+   results to the comments automatically. The books are then summarized one by
+   one in a background job, and a results table shows each book's summary with
+   **Save selected** / **Save all** buttons. A book that fails (e.g. no
+   extractable format) is marked as an error and the rest of the batch
+   continues.
 
 If no AI provider is configured, the dialog shows a link to configure one.
 
@@ -41,7 +47,7 @@ If no AI provider is configured, the dialog shows a link to configure one.
 | Sampling | How a too-large book is reduced for single-shot: evenly spaced segments, or from the beginning |
 | Sample segments | Number of evenly spaced segments to sample |
 | Map-reduce chunk size | Size of each chunk when using map-reduce |
-| Save to comments | Append to, or replace, the book's `comments` field |
+| Save to comments | How the AI summary is combined with the existing `comments`: at the top (default), at the bottom, or replace. Re-saving replaces the previous AI summary and leaves the rest untouched |
 
 Quick actions can be customized (add, edit, remove, reorder) from the
 **Actions** tab of the dialog's settings, and the metadata fields sent to the
@@ -50,8 +56,12 @@ AI (title and authors are always sent; series, tags, publisher, custom fields,
 
 ## Notes
 
-- v1 summarizes a **single book** at a time (the first selected book if
-  several are selected).
+- A **single** selected book opens the chat dialog (with follow-up questions);
+  **two or more** go through the batch flow (setup dialog → background job →
+  results table). Batch books are processed sequentially.
+- Saved summaries are wrapped in markers inside the `comments` field, so
+  re-saving replaces the previous AI summary and leaves your other notes
+  intact.
 - Text is extracted with calibre's own full-text-search extractor, so any
   format calibre can index works (EPUB, MOBI, PDF, ...). Comic formats are
   skipped.
