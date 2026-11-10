@@ -1,0 +1,8 @@
+The Ask AI Plugin
+=================
+
+Created by Jobobby04
+
+Requires calibre >= 8.16.2
+
+Ask the AI about a book's content using calibre's built-in AI support.

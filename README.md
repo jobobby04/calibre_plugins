@@ -8,10 +8,11 @@ This is the official home for Jobobby04's plugins for [calibre][calibre-url].
 
 The following plugins are maintained in this repository:
 
-| Plugin Name        | Plugin Type | Details                                | Summary                                                   |
-|--------------------|-------------|----------------------------------------|-----------------------------------------------------------|
-| EkaPortal          | Metadata    | [README](ekaportal/README.md)          | Download metadata from [Eka's Portal][https://aryion.com] |
-| Clipboard Metadata | Metadata    | [README](clipboard_metadata/README.md) | Copy metadata from any website and paste it in Calibre    |
+| Plugin Name        | Plugin Type      | Details                                | Summary                                                       |
+|--------------------|------------------|----------------------------------------|---------------------------------------------------------------|
+| EkaPortal          | Metadata         | [README](ekaportal/README.md)          | Download metadata from [Eka's Portal][https://aryion.com]     |
+| Clipboard Metadata | Metadata         | [README](clipboard_metadata/README.md) | Copy metadata from any website and paste it in Calibre        |
+| Ask AI             | Interface Action | [README](ask_ai/README.md)             | Ask the AI about a book's content using calibre's built-in AI |
 
 ## Contributions are Welcome
 
