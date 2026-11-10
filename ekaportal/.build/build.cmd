@@ -1,4 +1,8 @@
 @echo off
+rem Map renamed environment variables back to the names calibre expects
+if defined CALIBRE_CONFIG_DIRECTORY_TMPREMOVE set "CALIBRE_CONFIG_DIRECTORY=%CALIBRE_CONFIG_DIRECTORY_TMPREMOVE%"
+if defined CALIBRE_DEVELOP_FROM_TMPREMOVE set "CALIBRE_DEVELOP_FROM=%CALIBRE_DEVELOP_FROM_TMPREMOVE%"
+if defined CALIBRE_DIRECTORY_TMPREMOVE set "CALIBRE_DIRECTORY=%CALIBRE_DIRECTORY_TMPREMOVE%"
 cd ..
 if exist "translations" (
     cd translations
