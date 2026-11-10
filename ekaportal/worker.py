@@ -63,10 +63,6 @@ class Worker(Thread): # Get details
                 self.log.exception(msg)
             return
 
-        #raw = raw.decode('utf-8', errors='replace')
-        #raw = raw.replace(" async ", " ")
-        #open('E:\\t3.html', 'wb').write(raw)
-
         try:
             root = BeautifulSoup(raw)
         except:
