@@ -305,17 +305,18 @@ def run_map_reduce(mi, text, chunk_chars, plugin, allowed_fields,
 # Save to comments (idempotent)
 # ---------------------------------------------------------------------------
 
-# HTML-comment markers delimiting the AI block inside the book's comments.
-# They are invisible in calibre's rendered comments and give a reliable
-# boundary: re-running replaces the block between the markers and leaves the
-# regular comments (separated by an <hr> rule) untouched.
-BEGIN_MARKER = '<!-- AskAI:begin -->'
-END_MARKER = '<!-- AskAI:end -->'
+# The AI block is delimited by its ``<h2>AI Summary</h2>`` header and the
+# ``<hr>`` rule that separates it from the regular comments. (HTML-comment
+# markers were tried but calibre strips comments from the comments field, so
+# they are never persisted and cannot be relied on.) Re-running replaces the
+# block and leaves the regular comments untouched.
 SEPARATOR = '<hr>'
 
 # Matches an <hr> rule line, tolerating the variations calibre/Qt may normalize
 # it to (<hr>, <hr/>, <hr />).
 _HR_RE = re.compile(r'^<hr\s*/?>$', re.IGNORECASE)
+# An <hr> rule anywhere in the text (used to find the legacy block's end).
+_ANY_HR_RE = re.compile(r'<hr\s*/?>', re.IGNORECASE)
 
 
 def _strip_separator(text, side):
@@ -331,23 +332,41 @@ def _strip_separator(text, side):
     return '\n'.join(lines).strip()
 
 
+def _strip_div_edges(text):
+    """Strip a leading ``<div ...>`` and/or trailing ``</div>`` from ``text``.
+
+    calibre wraps the whole comments field in a single ``<div>``; when the AI
+    block is removed, a bare edge of that wrapper can be left behind.
+    """
+    t = (text or '').strip()
+    m = re.match(r'^<div[^>]*>\s*', t)
+    if m:
+        t = t[m.end():]
+    m = re.search(r'\s*</div>\s*$', t)
+    if m:
+        t = t[:m.start()]
+    return t.strip()
+
+
 def regular_comments(existing):
     """
     Return the regular (non-AI) part of an existing comments field.
 
-    If the comments contain an AskAI block (between the HTML-comment markers)
-    it is removed — along with the <hr> separator next to it — and the
-    remaining regular comments are returned. Comments without a block are
-    returned unchanged (stripped).
+    If the comments contain an AI block (the ``<h2>AI Summary</h2>`` header
+    through the ``<hr>`` separator) it is removed — along with the ``<hr>`` —
+    and the remaining regular comments are returned. Comments without a block
+    are returned unchanged (stripped).
     """
     existing = (existing or '').strip()
-    b = existing.find(BEGIN_MARKER)
-    e = existing.find(END_MARKER)
-    if b == -1 or e == -1 or e < b:
+    bounds = _ai_block_bounds(existing)
+    if bounds is None:
         return existing
-    before = _strip_separator(existing[:b], 'end')
-    after = _strip_separator(existing[e + len(END_MARKER):], 'start')
-    return '\n\n'.join(p for p in (before, after) if p)
+    start, end = bounds
+    if end < len(existing):
+        # Prepend mode: <hr> + regular comments follow the block.
+        return _strip_div_edges(_strip_separator(existing[end:], 'start'))
+    # Append mode (or no regular comments): they precede the block.
+    return _strip_div_edges(_strip_separator(existing[:start], 'end'))
 
 
 def _markdown_to_html(text):
@@ -372,14 +391,13 @@ def apply_summary_to_comments(existing, summary, mode='prepend'):
     applied.
 
     The summary (markdown) is converted to HTML — the comments field is HTML,
-    so this is what makes headings and line breaks render — and wrapped in the
-    AskAI markers so that re-running replaces the previous AI block while
-    leaving the regular comments untouched. ``mode`` is 'prepend' (AI block on
-    top, then <hr>, then the regular comments), 'append' (the mirror image) or
-    'replace' (the AI block only).
+    so this is what makes headings and line breaks render — and headed with the
+    ``<h2>AI Summary</h2>`` marker so that re-running replaces the previous AI
+    block (found by that header) while leaving the regular comments untouched.
+    ``mode`` is 'prepend' (AI block on top, then <hr>, then the regular
+    comments), 'append' (the mirror image) or 'replace' (the AI block only).
     """
-    body = _markdown_to_html(_('## AI Summary') + '\n' + summary.strip())
-    block = '%s\n%s\n%s' % (BEGIN_MARKER, body, END_MARKER)
+    block = _markdown_to_html(_('## AI Summary') + '\n' + summary.strip())
     regular = regular_comments(existing)
     if mode == 'replace' or not regular:
         return block
@@ -388,24 +406,47 @@ def apply_summary_to_comments(existing, summary, mode='prepend'):
     return block + '\n\n' + SEPARATOR + '\n\n' + regular
 
 
+def _ai_header_html():
+    """The ``<h2>`` header that :func:`apply_summary_to_comments` puts on the
+    AI block (locale-aware)."""
+    return _markdown_to_html(_('## AI Summary')).strip()
+
+
+def _ai_block_bounds(comments):
+    """Return ``(start, end)`` of the AI block in ``comments``, or ``None`` if
+    there is no block.
+
+    The block starts at the ``<h2>AI Summary</h2>`` header and runs to the next
+    ``<hr>`` separator when the header precedes it (prepend mode), or to the end
+    of the comments otherwise (append mode / no regular comments).
+    """
+    header = _ai_header_html()
+    h = comments.find(header)
+    if h == -1:
+        return None
+    m = _ANY_HR_RE.search(comments, h + len(header))
+    end = m.start() if m else len(comments)
+    return h, end
+
+
 # ---------------------------------------------------------------------------
 # Series context (prior-book summaries for continuity)
 # ---------------------------------------------------------------------------
 
 def extract_ai_block(comments):
-    """Return the AI summary stored between the AskAI markers in ``comments``,
-    as markdown, or ``None`` if there is no block.
+    """Return the AI summary stored in ``comments``, as markdown, or ``None``
+    if there is no block.
 
     This is the inverse of :func:`apply_summary_to_comments`: the stored block
     is HTML (the comments field is HTML), so it is converted back to markdown
-    for use as readable context.
+    for use as readable context. The block is located by its
+    ``<h2>AI Summary</h2>`` header (see :func:`_ai_block_bounds`).
     """
     comments = (comments or '').strip()
-    b = comments.find(BEGIN_MARKER)
-    e = comments.find(END_MARKER)
-    if b == -1 or e == -1 or e < b:
+    bounds = _ai_block_bounds(comments)
+    if bounds is None:
         return None
-    body = comments[b + len(BEGIN_MARKER):e].strip()
+    body = comments[bounds[0]:bounds[1]].strip()
     if not body:
         return None
     return comments_as_markdown(body)

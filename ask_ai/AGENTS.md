@@ -177,9 +177,9 @@ unlimited, capped by the character budget).
 Helpers in `content.py` (all GUI-free):
 
 - `extract_ai_block(comments)` — the inverse of `apply_summary_to_comments`:
-  returns the AI summary stored between the `<!-- AskAI:begin/end -->` markers
-  as markdown (via `comments_as_markdown`), or `None`. This is how saved
-  summaries are read back as context.
+  returns the AI summary stored in the comments (located by its
+  `<h2>AI Summary</h2>` header) as markdown (via `comments_as_markdown`), or
+  `None`. This is how saved summaries are read back as context.
 - `build_series_context(db, book_id, max_chars, max_books=0)` — builds the
   context for `book_id` from **saved** summaries only. Returns
   `(entries, position)`: `entries` is a list of `(position, title, summary)`
@@ -251,31 +251,38 @@ max-tokens pref to "fix" it.
 
 ## Save to comments
 
-Saving writes the AI output into the book's `comments` field, wrapped in
-HTML-comment markers so it is **idempotent** and stays separate from the
+Saving writes the AI output into the book's `comments` field, headed with an
+`<h2>AI Summary</h2>` marker so it is **idempotent** and stays separate from the
 regular comments:
 
 ```
-<!-- AskAI:begin -->
 <h2>AI Summary</h2>
 <p>…the AI summary, converted to HTML…</p>
-<!-- AskAI:end -->
 
 <hr>
 
 <existing regular comments>
 ```
 
+The block is delimited by its `<h2>AI Summary</h2>` header and the `<hr>` rule
+that follows it. **Do not use HTML-comment markers** (`<!-- … -->`) to delimit
+the block: calibre strips comments from the comments field, so they are never
+persisted and cannot be relied on.
+
 - `content.apply_summary_to_comments(existing, summary, mode)` builds the new
   value. The summary (markdown) is converted to HTML by
   `content._markdown_to_html` so headings and line breaks render (the comments
   field is HTML). `mode` is the `save_mode` pref: `prepend` (default, AI block
   on top), `append` (mirror image), or `replace` (the block only). Re-running
-  replaces the block between the markers and leaves the regular comments (after
-  the `<hr>`) untouched — `content.regular_comments(existing)` strips a previous
-  block (and its adjacent `<hr>`) to recover them. The `<hr>` is matched by
-  `content._HR_RE`, which tolerates the `<hr>`/`<hr/>`/`<hr />` variations that
-  calibre/Qt may normalize it to, so re-runs clean the rule up reliably.
+  replaces the previous block and leaves the regular comments (after the `<hr>`)
+  untouched — `content.regular_comments(existing)` strips a previous block (and
+  its adjacent `<hr>`) to recover them. The block is located by
+  `content._ai_block_bounds` (header = `content._ai_header_html()`, end = the
+  next `<hr>` from `content._ANY_HR_RE`, or the end of the text). The `<hr>` is
+  matched by `content._HR_RE`, which tolerates the `<hr>`/`<hr/>`/`<hr />`
+  variations that calibre/Qt may normalize it to, so re-runs clean the rule up
+  reliably. `content._strip_div_edges` drops the bare `<div>`/`</div>` edge
+  calibre's outer wrapper leaves behind.
 - **`content._markdown_to_html` and the `nl2br` gotcha.** It uses calibre's own
   `calibre.library.comments.markdown()` (the same converter the calibre GUI uses
   for the comments field) and then rewrites single newlines inside `<p>` blocks
